@@ -114,7 +114,7 @@ def extract_mesh(model, output, resolution=512):
 
     # output geometry
     mesh = trimesh.Trimesh(vertices, triangles, vertex_colors=vertex_colors)
-    mesh.export(str(f'{output}/mesh.ply'))
+    mesh.export(str(f'{output}/mesh.glb'))
 
 def main():
     parser = argparse.ArgumentParser()
