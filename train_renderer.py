@@ -114,7 +114,7 @@ def extract_mesh(model, output, resolution=512):
 
     # output geometry
     mesh = trimesh.Trimesh(vertices, triangles, vertex_colors=vertex_colors)
-    mesh.simplify_quadric_decimation(face_count=50000)
+    mesh = mesh.simplify_quadric_decimation(face_count=50000)
     mesh.export(str(f'{output}/mesh.ply'))
 
 def main():
