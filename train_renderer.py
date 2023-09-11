@@ -97,8 +97,7 @@ def extract_fields(bound_min, bound_max, resolution, query_func, batch_size=64, 
 
 def extract_geometry(bound_min, bound_max, resolution, threshold, query_func, color_func, outside_val=1.0):
     u = extract_fields(bound_min, bound_max, resolution, query_func, outside_val=outside_val)
-    smoothed = mcubes.smooth(u)
-    vertices, triangles = mcubes.marching_cubes(smoothed, 0)
+    vertices, triangles = mcubes.marching_cubes(u, threshold)
     b_max_np = bound_max.detach().cpu().numpy()
     b_min_np = bound_min.detach().cpu().numpy()
 
