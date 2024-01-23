@@ -227,7 +227,8 @@ class SyncMultiviewDiffusion(pl.LightningModule):
                  view_num=16, image_size=256,
                  cfg_scale=3.0, output_num=8, batch_view_num=4,
                  drop_conditions=False, drop_scheme='default',
-                 clip_image_encoder_path="/apdcephfs/private_rondyliu/projects/clip/ViT-L-14.pt"):
+                 clip_image_encoder_path="/apdcephfs/private_rondyliu/projects/clip/ViT-L-14.pt",
+                 sample_type='ddim', sample_steps=200):
         super().__init__()
 
         self.finetune_unet = finetune_unet
@@ -255,7 +256,10 @@ class SyncMultiviewDiffusion(pl.LightningModule):
         self.scheduler_config = scheduler_config
 
         latent_size = image_size//8
-        self.ddim = SyncDDIMSampler(self, 200, "uniform", 1.0, latent_size=latent_size)
+        if sample_type=='ddim':
+            self.sampler = SyncDDIMSampler(self, sample_steps , "uniform", 1.0, latent_size=latent_size)
+        else:
+            raise NotImplementedError
 
     def _init_clip_projection(self):
         self.cc_projection = nn.Linear(772, 768)
@@ -422,7 +426,7 @@ class SyncMultiviewDiffusion(pl.LightningModule):
         return clip_embed_, frustum_volume_feats, x_concat
 
     def training_step(self, batch):
-        B = batch['image'].shape[0]
+        B = batch['target_image'].shape[0]
         time_steps = torch.randint(0, self.num_timesteps, (B,), device=self.device).long()
 
         x, clip_embed, input_info = self.prepare(batch)
@@ -468,13 +472,9 @@ class SyncMultiviewDiffusion(pl.LightningModule):
         x_noisy = sqrt_alphas_cumprod_ * x_start + sqrt_one_minus_alphas_cumprod_ * noise
         return x_noisy, noise
 
-    def sample(self, batch, cfg_scale, batch_view_num, use_ddim=True,
-               return_inter_results=False, inter_interval=50, inter_view_interval=2):
+    def sample(self, sampler, batch, cfg_scale, batch_view_num, return_inter_results=False, inter_interval=50, inter_view_interval=2):
         _, clip_embed, input_info = self.prepare(batch)
-        if use_ddim:
-            x_sample, inter = self.ddim.sample(input_info, clip_embed, unconditional_scale=cfg_scale, log_every_t=inter_interval, batch_view_num=batch_view_num)
-        else:
-            raise NotImplementedError
+        x_sample, inter = sampler.sample(input_info, clip_embed, unconditional_scale=cfg_scale, log_every_t=inter_interval, batch_view_num=batch_view_num)
 
         N = x_sample.shape[1]
         x_sample = torch.stack([self.decode_first_stage(x_sample[:, ni]) for ni in range(N)], 1)
@@ -494,19 +494,14 @@ class SyncMultiviewDiffusion(pl.LightningModule):
         else:
             return x_sample
 
-    def log_image(self,  x_sample, batch, step, output_dir, only_first_row=False):
+    def log_image(self,  x_sample, batch, step, output_dir):
         process = lambda x: ((torch.clip(x, min=-1, max=1).cpu().numpy() * 0.5 + 0.5) * 255).astype(np.uint8)
         B = x_sample.shape[0]
         N = x_sample.shape[1]
         image_cond = []
         for bi in range(B):
-            img_pr_ = concat_images_list(process(batch['ref_image'][bi]),*[process(x_sample[bi, ni].permute(1, 2, 0)) for ni in range(N)])
-            img_gt_ = concat_images_list(process(batch['ref_image'][bi]),*[process(batch['image'][bi, ni]) for ni in range(N)])
-            if not only_first_row or bi==0:
-                image_cond.append(concat_images_list(img_gt_, img_pr_, vert=True))
-            else:
-                image_cond.append(img_pr_)
-
+            img_pr_ = concat_images_list(process(batch['input_image'][bi]),*[process(x_sample[bi, ni].permute(1, 2, 0)) for ni in range(N)])
+            image_cond.append(img_pr_)
 
         output_dir = Path(output_dir)
         imsave(str(output_dir/f'{step}.jpg'), concat_images_list(*image_cond, vert=True))
@@ -518,7 +513,7 @@ class SyncMultiviewDiffusion(pl.LightningModule):
             step = self.global_step
             batch_ = {}
             for k, v in batch.items(): batch_[k] = v[:self.output_num]
-            x_sample = self.sample(batch_, self.cfg_scale, self.batch_view_num)
+            x_sample = self.sample(self.sampler, batch_, self.cfg_scale, self.batch_view_num)
             output_dir = Path(self.image_dir) / 'images' / 'val'
             output_dir.mkdir(exist_ok=True, parents=True)
             self.log_image(x_sample, batch, step, output_dir=output_dir)
@@ -545,7 +540,7 @@ class SyncMultiviewDiffusion(pl.LightningModule):
         return [opt], scheduler
 
 class SyncDDIMSampler:
-    def __init__(self, model: SyncMultiviewDiffusion, ddim_num_steps, ddim_discretize="uniform", ddim_eta=0., latent_size=32):
+    def __init__(self, model: SyncMultiviewDiffusion, ddim_num_steps, ddim_discretize="uniform", ddim_eta=1.0, latent_size=32):
         super().__init__()
         self.model = model
         self.ddpm_num_timesteps = model.num_timesteps
